@@ -57,9 +57,13 @@
                 </lvc:CartesianChart>
             </GroupBox>
 
-            <!-- Decibel Level -->
+            <!-- Decibel Level and Current Frequency -->
             <GroupBox Header="Decibel Level" Margin="5" Grid.Column="0" Grid.Row="1" Grid.ColumnSpan="2">
-                <ProgressBar Name="DecibelProgressBar" Minimum="-60" Maximum="0" Height="25" Margin="10"/>
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="10">
+                    <ProgressBar Name="DecibelProgressBar" Minimum="-60" Maximum="0" Height="25" Width="200"/>
+                    <TextBlock Text="Current Frequency: " VerticalAlignment="Center" Margin="20,0,5,0" FontSize="14"/>
+                    <TextBlock Name="CurrentFrequencyLabel" Text="0 Hz" VerticalAlignment="Center" FontSize="14" FontWeight="Bold"/>
+                </StackPanel>
             </GroupBox>
         </Grid>
     </Grid>

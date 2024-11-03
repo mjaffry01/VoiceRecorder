@@ -7,6 +7,10 @@ using LiveCharts.Defaults;
 using LiveCharts.Wpf;
 using NAudio.Wave;
 using System.Windows.Threading;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using MathNet.Numerics.IntegralTransforms;
+using System.Diagnostics;
 
 namespace VoiceRecorder
 {
@@ -15,7 +19,7 @@ namespace VoiceRecorder
         // NAudio Variables
         private WaveInEvent? waveIn = null;
         private WaveFileWriter? waveWriter = null;
-        private readonly string outputFilePath = "recordedAudio.wav";
+        private string outputFilePath = "";
         private WaveOutEvent? waveOut = null;
         private AudioFileReader? audioFileReader = null;
 
@@ -27,7 +31,7 @@ namespace VoiceRecorder
         // FFT Variables
         private readonly int fftLength = 1024; // Must be a power of 2
         private readonly double[] fftBuffer;
-        private readonly Complex[] fftComplexBuffer;
+        private List<double> sampleBuffer = new List<double>();
 
         public MainWindow()
         {
@@ -69,7 +73,6 @@ namespace VoiceRecorder
 
             // Initialize FFT buffers
             fftBuffer = new double[fftLength];
-            fftComplexBuffer = new Complex[fftLength];
 
             // Initialize and start the dispatcher timer
             timer = new DispatcherTimer
@@ -78,6 +81,12 @@ namespace VoiceRecorder
             };
             timer.Tick += Timer_Tick;
             timer.Start();
+        }
+
+        private string GetUniqueFilePath()
+        {
+            string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+            return $"recordedAudio_{timestamp}.wav";
         }
 
         private void RecordButton_Click(object sender, RoutedEventArgs e)
@@ -90,9 +99,10 @@ namespace VoiceRecorder
                     WaveFormat = new WaveFormat(44100, 1) // 44.1kHz, Mono
                 };
                 waveIn.DataAvailable += OnDataAvailable;
-                waveIn.RecordingStopped += OnRecordingStopped;
+                waveIn.RecordingStopped += OnRecordingStopped; // Ensure this line is before StartRecording
 
-                // Initialize WaveFileWriter to write data to a WAV file
+                // Initialize WaveFileWriter with unique file path
+                outputFilePath = GetUniqueFilePath();
                 waveWriter = new WaveFileWriter(outputFilePath, waveIn.WaveFormat);
 
                 waveIn.StartRecording();
@@ -102,6 +112,8 @@ namespace VoiceRecorder
                 StopButton.IsEnabled = true;
                 PlayButton.IsEnabled = false;
                 SaveButton.IsEnabled = false;
+
+                Debug.WriteLine("Recording started.");
             }
             catch (Exception ex)
             {
@@ -118,7 +130,8 @@ namespace VoiceRecorder
                 // Update UI
                 RecordButton.IsEnabled = true;
                 StopButton.IsEnabled = false;
-                // PlayButton and SaveButton are enabled in OnRecordingStopped
+
+                Debug.WriteLine("Recording stopped.");
             }
             catch (Exception ex)
             {
@@ -130,7 +143,7 @@ namespace VoiceRecorder
         {
             try
             {
-                if (!File.Exists(outputFilePath))
+                if (string.IsNullOrEmpty(outputFilePath) || !File.Exists(outputFilePath))
                 {
                     MessageBox.Show("No recording found to play.", "Playback Error", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
@@ -154,6 +167,8 @@ namespace VoiceRecorder
                 RecordButton.IsEnabled = false;
                 StopButton.IsEnabled = false;
                 SaveButton.IsEnabled = false;
+
+                Debug.WriteLine("Playback started.");
             }
             catch (Exception ex)
             {
@@ -165,7 +180,7 @@ namespace VoiceRecorder
         {
             try
             {
-                if (!File.Exists(outputFilePath))
+                if (string.IsNullOrEmpty(outputFilePath) || !File.Exists(outputFilePath))
                 {
                     MessageBox.Show("No recording found to save.", "Save Error", MessageBoxButton.OK, MessageBoxImage.Warning);
                     return;
@@ -192,6 +207,7 @@ namespace VoiceRecorder
                     string destinationPath = saveFileDialog.FileName;
                     File.Copy(outputFilePath, destinationPath, overwrite: true);
                     MessageBox.Show($"Audio saved to {destinationPath}", "Save Successful", MessageBoxButton.OK, MessageBoxImage.Information);
+                    Debug.WriteLine($"Audio saved to {destinationPath}");
                 }
             }
             catch (Exception ex)
@@ -208,7 +224,7 @@ namespace VoiceRecorder
             waveWriter.Flush();
 
             // Convert bytes to float samples
-            int bytesPerSample = waveIn.WaveFormat.BitsPerSample / 8;
+            int bytesPerSample = waveIn!.WaveFormat.BitsPerSample / 8;
             int sampleCount = e.BytesRecorded / bytesPerSample;
 
             for (int index = 0; index < sampleCount; index++)
@@ -218,106 +234,191 @@ namespace VoiceRecorder
                 float sample = sampleShort / 32768f; // Normalize to -1.0 to 1.0
 
                 // Add to waveform data
-                Dispatcher.Invoke(() =>
+                Dispatcher.BeginInvoke(new Action(() =>
                 {
-                    double time = WaveformValues.Count * 0.1; // 100 ms per sample (adjust as needed)
+                    double time = WaveformValues.Count * 0.1; // Adjust based on actual sampling rate
                     WaveformValues.Add(new ObservablePoint(time, sample));
                     if (WaveformValues.Count > 1000) // Limit number of points to prevent memory issues
                         WaveformValues.RemoveAt(0);
-                });
+                }));
 
-                // Fill FFT buffer
-                fftBuffer[index % fftLength] += sample;
+                // Accumulate samples for FFT
+                sampleBuffer.Add(sample);
+
+                if (sampleBuffer.Count >= fftLength)
+                {
+                    // Copy to fftBuffer
+                    for (int i = 0; i < fftLength; i++)
+                    {
+                        fftBuffer[i] = sampleBuffer[i];
+                    }
+
+                    // Clear the buffer for next set of samples
+                    sampleBuffer.Clear();
+                }
             }
 
             // Calculate RMS for Decibel
             double rms = CalculateRMS(fftBuffer);
             double decibel = RMSToDecibel(rms);
-            Dispatcher.Invoke(() =>
+            Dispatcher.BeginInvoke(new Action(() =>
             {
                 DecibelProgressBar.Value = decibel;
-            });
+            }));
         }
 
         private void OnRecordingStopped(object sender, StoppedEventArgs e)
         {
-            waveIn?.Dispose();
-            waveIn = null;
-
-            waveWriter?.Dispose();
-            waveWriter = null;
-
-            if (e.Exception != null)
+            try
             {
-                MessageBox.Show($"Error during recording: {e.Exception.Message}", "Recording Error", MessageBoxButton.OK, MessageBoxImage.Error);
-            }
-            else
-            {
-                // Enable PlayButton and SaveButton only after recording has stopped successfully
-                Dispatcher.Invoke(() =>
+                waveIn?.Dispose();
+                waveIn = null;
+
+                waveWriter?.Dispose();
+                waveWriter = null;
+
+                if (e.Exception != null)
                 {
-                    PlayButton.IsEnabled = true;
-                    SaveButton.IsEnabled = true;
-                });
+                    MessageBox.Show($"Error during recording: {e.Exception.Message}", "Recording Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                    Debug.WriteLine($"Recording stopped with error: {e.Exception.Message}");
+                }
+                else
+                {
+                    // Enable PlayButton and SaveButton only after recording has stopped successfully
+                    Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        PlayButton.IsEnabled = true;
+                        SaveButton.IsEnabled = true;
+                    }));
+                    Debug.WriteLine("Recording stopped successfully.");
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Exception in OnRecordingStopped: {ex.Message}", "Exception Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                Debug.WriteLine($"Exception in OnRecordingStopped: {ex.Message}");
             }
         }
 
         private void OnPlaybackStopped(object sender, StoppedEventArgs e)
         {
-            waveOut?.Dispose();
-            waveOut = null;
-
-            audioFileReader?.Dispose();
-            audioFileReader = null;
-
-            // Update UI
-            Dispatcher.Invoke(() =>
+            try
             {
-                PlayButton.IsEnabled = true;
-                RecordButton.IsEnabled = true;
-                StopButton.IsEnabled = false;
-                SaveButton.IsEnabled = true;
-            });
+                waveOut?.Dispose();
+                waveOut = null;
 
-            if (e.Exception != null)
+                audioFileReader?.Dispose();
+                audioFileReader = null;
+
+                // Update UI
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    PlayButton.IsEnabled = true;
+                    RecordButton.IsEnabled = true;
+                    StopButton.IsEnabled = false;
+                    SaveButton.IsEnabled = true;
+                }));
+
+                if (e.Exception != null)
+                {
+                    MessageBox.Show($"Error during playback: {e.Exception.Message}", "Playback Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                    Debug.WriteLine($"Playback stopped with error: {e.Exception.Message}");
+                }
+                else
+                {
+                    Debug.WriteLine("Playback stopped successfully.");
+                }
+            }
+            catch (Exception ex)
             {
-                MessageBox.Show($"Error during playback: {e.Exception.Message}", "Playback Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show($"Exception in OnPlaybackStopped: {ex.Message}", "Exception Error", MessageBoxButton.OK, MessageBoxImage.Error);
+                Debug.WriteLine($"Exception in OnPlaybackStopped: {ex.Message}");
             }
         }
 
-        private void Timer_Tick(object? sender, EventArgs e)
+        private async void Timer_Tick(object? sender, EventArgs e)
         {
-            if (waveIn == null) return; // Only process if recording
+            if (waveIn == null || fftBuffer.Length == 0) return; // Only process if recording and buffer is filled
 
-            // Perform FFT on the buffer
-            for (int i = 0; i < fftLength; i++)
+            Debug.WriteLine("Performing FFT...");
+
+            // Perform FFT on the buffer asynchronously to prevent UI blocking
+            await Task.Run(() =>
             {
-                fftComplexBuffer[i] = new Complex(fftBuffer[i], 0);
-            }
+                // Prepare a complex buffer for FFT
+                Complex[] complexBuffer = new Complex[fftLength];
+                for (int i = 0; i < fftLength; i++)
+                {
+                    complexBuffer[i] = new Complex(fftBuffer[i], 0);
+                }
 
-            // Perform FFT
-            FastFourierTransform.FFT(true, (int)Math.Log(fftLength, 2.0), fftComplexBuffer);
+                // Apply a windowing function (e.g., Hamming window) to reduce spectral leakage
+                for (int i = 0; i < fftLength; i++)
+                {
+                    double window = 0.54 - 0.46 * Math.Cos(2 * Math.PI * i / (fftLength - 1)); // Hamming window
+                    complexBuffer[i] *= window;
+                }
 
-            // Calculate magnitude
-            double[] magnitudes = new double[fftLength / 2];
-            for (int i = 0; i < magnitudes.Length; i++)
-            {
-                magnitudes[i] = fftComplexBuffer[i].Magnitude;
-            }
+                // Perform FFT using MathNet.Numerics
+                Fourier.Forward(complexBuffer, FourierOptions.Matlab);
 
-            // Update FrequencyChart
-            Dispatcher.Invoke(() =>
-            {
-                FrequencyValues.Clear();
+                // Calculate magnitude
+                double[] magnitudes = new double[fftLength / 2];
+                for (int i = 0; i < magnitudes.Length; i++)
+                {
+                    magnitudes[i] = complexBuffer[i].Magnitude;
+                }
+
+                // Find the index of the maximum magnitude
+                int maxIndex = 0;
+                double maxMagnitude = 0;
+                for (int i = 0; i < magnitudes.Length; i++)
+                {
+                    if (magnitudes[i] > maxMagnitude)
+                    {
+                        maxMagnitude = magnitudes[i];
+                        maxIndex = i;
+                    }
+                }
+
+                // Calculate the dominant frequency
+                double dominantFrequency = maxIndex * (waveIn.WaveFormat.SampleRate / (double)fftLength);
+
+                // Optional: Apply parabolic interpolation for better accuracy
+                if (maxIndex > 0 && maxIndex < magnitudes.Length - 1)
+                {
+                    double alpha = magnitudes[maxIndex - 1];
+                    double beta = magnitudes[maxIndex];
+                    double gamma = magnitudes[maxIndex + 1];
+
+                    // Parabolic interpolation formula
+                    double p = 0.5 * (alpha - gamma) / (alpha - 2 * beta + gamma);
+                    dominantFrequency = (maxIndex + p) * (waveIn.WaveFormat.SampleRate / (double)fftLength);
+                }
+
+                // Prepare data for UI thread
+                List<ObservablePoint> frequencyData = new List<ObservablePoint>();
                 for (int i = 0; i < magnitudes.Length; i++)
                 {
                     double frequency = i * (waveIn.WaveFormat.SampleRate / (double)fftLength);
-                    FrequencyValues.Add(new ObservablePoint(frequency, magnitudes[i]));
+                    frequencyData.Add(new ObservablePoint(frequency, magnitudes[i]));
                 }
-            });
 
-            // Reset FFT buffer
-            Array.Clear(fftBuffer, 0, fftBuffer.Length);
+                // Update FrequencyChart and CurrentFrequencyLabel on UI thread
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    FrequencyValues.Clear();
+                    foreach (var point in frequencyData)
+                    {
+                        FrequencyValues.Add(point);
+                    }
+
+                    // Update the Current Frequency Label
+                    CurrentFrequencyLabel.Text = $"{dominantFrequency:F1} Hz";
+                }));
+
+                Debug.WriteLine($"FFT completed. Dominant Frequency: {dominantFrequency:F1} Hz");
+            });
         }
 
         // RMS Calculation for Decibel
@@ -364,72 +465,18 @@ namespace VoiceRecorder
             // File is not locked
             return false;
         }
-    }
 
-    // Fast Fourier Transform Implementation
-    public static class FastFourierTransform
-    {
-        public static void FFT(bool forward, int m, Complex[] data)
+        protected override void OnClosed(EventArgs e)
         {
-            int n = 1 << m;
-            int i, j, k, n1, n2, a;
-            Complex c, t;
-            // Bit-reversal
-            j = 0;
-            n2 = n / 2;
-            for (i = 1; i < (n - 1); i++)
-            {
-                n1 = n2;
-                while (j >= n1)
-                {
-                    j = j - n1;
-                    n1 = n1 / 2;
-                }
-                j = j + n1;
+            base.OnClosed(e);
 
-                if (i < j)
-                {
-                    t = data[i];
-                    data[i] = data[j];
-                    data[j] = t;
-                }
-            }
+            waveIn?.Dispose();
+            waveWriter?.Dispose();
+            waveOut?.Dispose();
+            audioFileReader?.Dispose();
+            timer.Stop();
 
-            // FFT
-            n1 = 0;
-            n2 = 1;
-
-            for (i = 0; i < m; i++)
-            {
-                n1 = n2;
-                n2 = n2 + n2;
-                a = 0;
-
-                for (j = 0; j < n1; j++)
-                {
-                    double cAngle = -2 * Math.PI * a / n2;
-                    if (!forward)
-                        cAngle = -cAngle;
-                    c = new Complex(Math.Cos(cAngle), Math.Sin(cAngle));
-
-                    for (k = j; k < n; k = k + n2)
-                    {
-                        t = data[k + n1] * c;
-                        data[k + n1] = data[k] - t;
-                        data[k] = data[k] + t;
-                    }
-                    a += 1;
-                }
-            }
-
-            // If inverse FFT, divide by n
-            if (!forward)
-            {
-                for (i = 0; i < n; i++)
-                {
-                    data[i] /= n;
-                }
-            }
+            Debug.WriteLine("Application closed and resources disposed.");
         }
     }
 }
